@@ -60,7 +60,7 @@ st.set_page_config(page_title="Cecotec BI Dashboard", layout="wide")
 st.sidebar.image("https://cecotec.es/img/cecotec-logo-1621516053.jpg", width=200)
 st.title("🛡️ Cecotec Business & Quality Control")
 
-# --- LÓGICA DE HISTÓRICO (RESTAURADA) ---
+# --- LÓGICA DE HISTÓRICO ---
 archivos_pasados = sorted([f for f in os.listdir(PATH_HISTORICO) if f.endswith('.xlsx')], reverse=True)
 archivo_comparar = st.sidebar.selectbox("🕒 Comparativa Temporal:", ["Ninguno"] + archivos_pasados)
 
@@ -74,7 +74,7 @@ if keepa_file and listings_file:
         df_k = pd.read_excel(keepa_file, engine='openpyxl')
         df_l = pd.read_excel(listings_file, engine='openpyxl')
         
-        # Guardar copia para el histórico si no existe
+        # Guardado preventivo
         ts = datetime.now().strftime('%Y%m%d_%H%M')
         path_save = os.path.join(PATH_HISTORICO, f"keepa_{ts}.xlsx")
         if not os.path.exists(path_save):
@@ -95,8 +95,8 @@ if keepa_file and listings_file:
         if n_bsr in df_k.columns:
             df_k[n_bsr] = df_k[n_bsr].apply(extraer_solo_numero_bsr)
 
-        # --- LÓGICA DE TENDENCIAS ---
-        col_tendencia = None
+        # --- TENDENCIAS (CON CONTROL DE ERROR) ---
+        col_tendencia_key = None
         if archivo_comparar != "Ninguno":
             df_p = pd.read_excel(os.path.join(PATH_HISTORICO, archivo_comparar), engine='openpyxl')
             df_p.columns = [normalizar_texto(c) for c in df_p.columns]
@@ -110,14 +110,15 @@ if keepa_file and listings_file:
                     return " ="
                 except: return " ="
 
-            col_tendencia = "Valoración (Tendencia)"
-            df_k[normalizar_texto(col_tendencia)] = df_k.apply(
+            col_tendencia_name = "Valoración (Tendencia)"
+            col_tendencia_key = normalizar_texto(col_tendencia_name)
+            df_k[col_tendencia_key] = df_k.apply(
                 lambda x: f"{float(x[n_rat]):.1f}{get_trend(x[n_rat], x[n_rat+'_old'])}" if not pd.isna(x[n_rat]) else "", axis=1
             )
 
         df = pd.merge(df_k, df_l.drop_duplicates('asin'), on='asin', how='left')
         
-        # Filtros y Limpieza
+        # Filtros
         n_sub = normalizar_texto("Subfamilia")
         if n_sub in df.columns:
             df = df[~df[n_sub].astype(str).str.lower().str.contains("accesorios", na=False)]
@@ -126,7 +127,7 @@ if keepa_file and listings_file:
         df['gl_display'] = df[normalizar_texto("GL")].fillna("Sin GL").apply(añadir_emoticono)
         df['sub_display'] = df[n_sub].fillna("Otros").apply(añadir_emoticono)
 
-        # Sidebar Filtros
+        # Sidebar
         st.sidebar.header("Filtros")
         opciones_gl = sorted(df['gl_display'].unique())
         default_gl = [g for g in opciones_gl if "kitchen" in g.lower()]
@@ -137,7 +138,7 @@ if keepa_file and listings_file:
         if sel_gl: df_f = df_f[df_f['gl_display'].isin(sel_gl)]
         if sel_sub: df_f = df_f[df_f['sub_display'].isin(sel_sub)]
 
-        # --- GRÁFICO ESTILIZADO ---
+        # --- GRÁFICO ---
         if not df_f.empty and n_rat in df_f.columns:
             resumen = df_f.groupby('sub_display')[n_rat].mean().dropna().reset_index()
             resumen = resumen[resumen[n_rat] > 0].sort_values(by=n_rat)
@@ -147,31 +148,49 @@ if keepa_file and listings_file:
                 fig.update_layout(bargap=0.6, coloraxis_showscale=False, xaxis_range=[0, 5.1])
                 st.plotly_chart(fig, use_container_width=True)
 
-        # --- TABLA ---
+        # --- TABLA (CORRECCIÓN [NONE] ERROR) ---
         st.markdown("### 📋 Detalle de Surtido")
         
-        # Formateo visual de miles
+        # Formateo miles
         cols_num = [n_fac, normalizar_texto("Stock Amazon"), normalizar_texto("Stock Operativo"), normalizar_texto("Consumo"), n_bsr]
         for c in cols_num:
             if c in df_f.columns:
-                es_m = (c == n_fac)
-                df_f[c] = df_f[c].apply(lambda x: formato_miles(x, es_moneda=es_m))
+                df_f[c] = df_f[c].apply(lambda x: formato_miles(x, es_moneda=(c == n_fac)))
 
         c_img_n = next((c for c in df_f.columns if "imagen" in c), None)
-        labels_map = {c_img_n: "📸", n_tit: "Título"}
         
-        resto = {
-            normalizar_texto("SKU"): "SKU", n_sub: "Subfamilia", 
-            n_rat: "Valoración", normalizar_texto(col_tendencia) if col_tendencia else None: col_tendencia,
-            n_rev: "Reseñas", n_bsr: "BSR", n_fac: "Facturación",
-            normalizar_texto("Stock Amazon"): "Stock AMZ", normalizar_texto("Stock Operativo"): "Stock Op.",
-            normalizar_texto("Consumo"): "Consumo", normalizar_texto("URL: Amazon"): "Link"
+        # Mapeo SEGURO de etiquetas
+        labels_map = {}
+        if c_img_n: labels_map[c_img_n] = "📸"
+        if n_tit: labels_map[n_tit] = "Título"
+        
+        columnas_base = {
+            normalizar_texto("SKU"): "SKU",
+            n_sub: "Subfamilia",
+            n_rat: "Valoración"
         }
         
-        for k, v in resto.items():
-            if k and k in df_f.columns: labels_map[k] = v
+        # Si existe tendencia, la añadimos al mapa
+        if col_tendencia_key and col_tendencia_key in df_f.columns:
+            columnas_base[col_tendencia_key] = "Tendencia"
 
-        sel_cols = st.multiselect("Columnas:", list(labels_map.keys()), default=list(labels_map.keys()), format_func=lambda x: labels_map[x])
+        columnas_base.update({
+            n_rev: "Reseñas",
+            n_bsr: "BSR",
+            n_fac: "Facturación",
+            normalizar_texto("Stock Amazon"): "Stock AMZ",
+            normalizar_texto("Stock Operativo"): "Stock Op.",
+            normalizar_texto("Consumo"): "Consumo",
+            normalizar_texto("URL: Amazon"): "Link"
+        })
+        
+        for k, v in columnas_base.items():
+            if k in df_f.columns:
+                labels_map[k] = v
+
+        # Selección de columnas filtrando las que son None
+        opciones_validas = [k for k in labels_map.keys() if k is not None]
+        sel_cols = st.multiselect("Columnas:", opciones_validas, default=opciones_validas, format_func=lambda x: labels_map[x])
         
         st.dataframe(df_f[sel_cols].fillna(""), column_config={
             c_img_n: st.column_config.ImageColumn("📸"),
@@ -179,5 +198,5 @@ if keepa_file and listings_file:
         }, hide_index=True, use_container_width=True)
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Se ha producido un error: {e}")
         
